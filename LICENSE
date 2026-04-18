@@ -1,0 +1,63 @@
+MIT License
+
+Copyright (c) 2026 GoSigner contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+================================================================================
+                           ACCEPTABLE USE NOTICE
+================================================================================
+
+This software is provided for lawful use by individuals and entities who are
+enrolled members of the Apple Developer Program and who hold valid Apple-
+issued signing certificates and provisioning profiles for the applications
+they sign.
+
+By obtaining, installing, or otherwise using this software, you represent and
+warrant that:
+
+  (a) you will comply with the Apple Developer Program License Agreement, the
+      Apple Developer Enterprise Program License Agreement (as applicable),
+      and all other Apple terms governing your use of Apple-issued signing
+      identities and device provisioning;
+
+  (b) you will use this software only to sign applications that you own,
+      that you have authored, or that you are otherwise expressly authorized
+      by their rights holders to resign and distribute;
+
+  (c) you will not use this software to circumvent any technological
+      protection measure, to disable or alter any Apple verification
+      mechanism, or to distribute pirated, cracked, tampered, or otherwise
+      unauthorized third-party applications;
+
+  (d) you are solely responsible for compliance with all applicable laws and
+      third-party agreements in your jurisdiction, including but not limited
+      to copyright, computer misuse, and export-control regulations.
+
+This software does not provide, and does not purport to provide, any means of
+bypassing Apple code-signing enforcement on iOS. Every cryptographic
+operation is performed locally, with keys supplied by the user, against
+inputs (certificates and profiles) that Apple itself has issued to the user.
+The validity of any signature produced by this software depends solely on
+the validity of those Apple-issued inputs.
+
+"Apple", "iOS", "iPhone", "iPad", "macOS", "Apple Developer Program", and
+related marks are trademarks of Apple Inc., registered in the United States
+and other countries. This project is not affiliated with, endorsed by, or
+sponsored by Apple Inc.
