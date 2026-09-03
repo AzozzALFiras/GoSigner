@@ -349,17 +349,19 @@ func repackageIPA(sourceDir string, outputPath string, zipLevel int) error {
 			return writer.AddDirectory(relPath)
 		}
 
-		data, err := os.ReadFile(absPath)
+		// Stream the file into the zip — never load it whole into memory, so a
+		// multi-GB asset can't trip iOS jetsam. AddFileFromReader sets the same
+		// 0755 mode as AddFile/AddExecutable, so permissions are unchanged.
+		f, err := os.Open(absPath)
 		if err != nil {
-			return fmt.Errorf("read %s: %w", relPath, err)
+			return fmt.Errorf("open %s: %w", relPath, err)
 		}
+		defer f.Close()
 
-		// Executables get special permissions
-		if info.Mode()&0111 != 0 {
-			return writer.AddExecutable(relPath, data)
+		if err := writer.AddFileFromReader(relPath, f, info.Size()); err != nil {
+			return fmt.Errorf("add %s: %w", relPath, err)
 		}
-
-		return writer.AddFile(relPath, data)
+		return nil
 	})
 }
 
