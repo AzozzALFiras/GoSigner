@@ -1,6 +1,7 @@
 package infoplist
 
 import (
+	"time"
 	"fmt"
 	"strconv"
 	"strings"
@@ -19,6 +20,7 @@ type ModifyOptions struct {
 	BundleVersion string // New version (empty = keep)
 	MinOSVersion  string // New minimum OS version (empty = keep, but auto-bump to 10.0 if lower)
 	EnableDocs    bool   // Enable UIFileSharingEnabled
+	IconName      string // CFBundleIconFiles base name (empty = keep existing icon)
 }
 
 // Modify updates Info.plist fields and returns the new plist bytes.
@@ -35,13 +37,17 @@ func Modify(data []byte, opts *ModifyOptions) ([]byte, error) {
 		raw["CFBundleIdentifier"] = opts.BundleID
 	}
 	if opts.BundleName != "" {
+		// Only the home-screen label. Never touch CFBundleName — changing it
+		// (e.g. to a value with spaces) can break installation.
 		raw["CFBundleDisplayName"] = opts.BundleName
-		raw["CFBundleName"] = opts.BundleName
 	}
 	if opts.BundleVersion != "" {
-		raw["CFBundleVersion"] = opts.BundleVersion
 		raw["CFBundleShortVersionString"] = opts.BundleVersion
 	}
+	// Always bump the build number to a monotonic value so a re-signed app
+	// installs as an UPDATE, never a downgrade (which makes iOS prompt
+	// "Delete <app>?" instead of updating).
+	raw["CFBundleVersion"] = fmt.Sprintf("%d", time.Now().Unix())
 
 	// Apply MinimumOSVersion: explicit override takes priority,
 	// otherwise auto-bump if current value is below 10.0
@@ -62,6 +68,18 @@ func Modify(data []byte, opts *ModifyOptions) ([]byte, error) {
 	if opts.EnableDocs {
 		raw["UIFileSharingEnabled"] = true
 		raw["UISupportsDocumentBrowser"] = true
+	}
+
+	// Point CFBundleIcons at the loose PNGs we write so a replaced icon wins over
+	// the one compiled into Assets.car.
+	if opts.IconName != "" {
+		primary := map[string]interface{}{
+			"CFBundleIconFiles": []interface{}{opts.IconName},
+			"CFBundleIconName":  opts.IconName,
+		}
+		raw["CFBundleIcons"] = map[string]interface{}{"CFBundlePrimaryIcon": primary}
+		raw["CFBundleIcons~ipad"] = map[string]interface{}{"CFBundlePrimaryIcon": primary}
+		delete(raw, "CFBundleIconName")
 	}
 
 	// Emit as XML plist. zsign with `-M <version>` also emits XML, and
