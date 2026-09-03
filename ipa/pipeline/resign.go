@@ -42,6 +42,10 @@ type ResignOptions struct {
 	StripProfile    bool     // Remove embedded profile
 	MinOSVersion    string   // Set minimum OS version
 	EnableDocs      bool     // Enable document sharing
+	IconFiles       map[string][]byte // loose icon PNGs to write into the .app root
+	IconName        string   // CFBundleIconFiles base name
+	WorkDir         string   // base dir for the temp extraction (empty = os default)
+	DeleteAssetsCar bool     // remove Assets.car (forces loose-PNG icon)
 	IsAdhoc         bool     // Ad-hoc signing
 }
 
@@ -67,7 +71,7 @@ func Resign(opts *ResignOptions) error {
 		len(appBundle.Frameworks), len(appBundle.Plugins), len(appBundle.Dylibs))
 
 	// Step 2: Extract to temp directory for signing
-	tempDir, err := os.MkdirTemp("", "gosigner-*")
+	tempDir, err := os.MkdirTemp(opts.WorkDir, "gosigner-*")
 	if err != nil {
 		return fmt.Errorf("create temp dir: %w", err)
 	}
@@ -109,6 +113,22 @@ func Resign(opts *ResignOptions) error {
 	log.Printf("[GoSigner] Modifying Info.plist (compatibility + user overrides)")
 	if err := modifyInfoPlist(appDir, opts); err != nil {
 		return fmt.Errorf("modify info.plist: %w", err)
+	}
+
+	// Replace app icon (loose PNGs referenced by CFBundleIconFiles).
+	if len(opts.IconFiles) > 0 {
+		log.Printf("[GoSigner] Replacing app icon (%d files)", len(opts.IconFiles))
+		for name, data := range opts.IconFiles {
+			if err := os.WriteFile(filepath.Join(appDir, name), data, 0644); err != nil {
+				return fmt.Errorf("write icon %s: %w", name, err)
+			}
+		}
+	}
+	// Delete Assets.car when asked, or whenever we replace the icon.
+	if opts.DeleteAssetsCar || len(opts.IconFiles) > 0 {
+		if err := os.Remove(filepath.Join(appDir, "Assets.car")); err == nil {
+			log.Printf("[GoSigner] Removed Assets.car")
+		}
 	}
 
 	// Step 4: Handle provisioning profile (NEVER delete unless explicitly asked)
@@ -220,6 +240,10 @@ func Resign(opts *ResignOptions) error {
 		if err := modifyDylibs(mainExecPath, opts); err != nil {
 			return fmt.Errorf("modify dylibs: %w", err)
 		}
+		// delete removed dylib files from the bundle root
+		for _, n := range opts.RemoveDylibs {
+			os.Remove(filepath.Join(appDir, filepath.Base(n)))
+		}
 	}
 
 	// Step 10: Generate CodeResources
@@ -265,6 +289,7 @@ func modifyInfoPlist(appDir string, opts *ResignOptions) error {
 		BundleVersion: opts.BundleVersion,
 		MinOSVersion:  opts.MinOSVersion,
 		EnableDocs:    opts.EnableDocs,
+		IconName:      opts.IconName,
 	})
 	if err != nil {
 		return err

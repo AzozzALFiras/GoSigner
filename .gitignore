@@ -2,3 +2,13 @@
 .env.example
 test*
 build*
+
+# Secret: signing pepper — injected at build time via -ldflags, never committed.
+PEPPER.txt
+*.pepper
+
+# Compiled FFI c-archive artifacts
+libgosigner.a
+libgosigner.h
+mobile/*.a
+mobile/*.h

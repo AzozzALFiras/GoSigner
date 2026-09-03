@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"encoding/base64"
 	"fmt"
 	"log"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	cert "github.com/AzozzALFiras/GoSigner/certificate"
 	"github.com/AzozzALFiras/GoSigner/certificate/loader"
 	"github.com/AzozzALFiras/GoSigner/engine/cleanup"
 	"github.com/AzozzALFiras/GoSigner/engine/downloader"
@@ -18,6 +20,7 @@ import (
 	"github.com/AzozzALFiras/GoSigner/ipa/pipeline"
 	plTypes "github.com/AzozzALFiras/GoSigner/plist"
 	"github.com/AzozzALFiras/GoSigner/plist/infoplist"
+	"github.com/AzozzALFiras/GoSigner/provision"
 	"github.com/AzozzALFiras/GoSigner/provision/entitlements"
 	"github.com/AzozzALFiras/GoSigner/provision/parser"
 )
@@ -129,40 +132,79 @@ func processApp(app jsoninput.AppRequest) jsoninput.AppResult {
 	os.MkdirAll(plistOutputDir, 0755)
 
 	// --- Step 4: Load certificate ---
-	if app.Cert == "" {
+	if app.Cert == "" && app.CertData == "" {
 		result.Error = "cert is required"
 		return done()
 	}
-	identity, err := loader.LoadP12(app.Cert, app.CertPassword)
-	if err != nil {
-		result.Error = fmt.Sprintf("load certificate: %v", err)
+	var identity *cert.SigningIdentity
+	var lerr error
+	if app.CertData != "" {
+		raw, derr := base64.StdEncoding.DecodeString(app.CertData)
+		if derr != nil {
+			result.Error = fmt.Sprintf("decode cert_data: %v", derr)
+			return done()
+		}
+		identity, lerr = loader.LoadP12FromBytes(raw, app.CertPassword)
+	} else {
+		identity, lerr = loader.LoadP12(app.Cert, app.CertPassword)
+	}
+	if lerr != nil {
+		result.Error = fmt.Sprintf("load certificate: %v", lerr)
 		return done()
 	}
 	log.Printf("[worker] Certificate: %s (Team: %s)", identity.SubjectCN, identity.TeamID)
 
 	// --- Step 5: Build resign options ---
 	opts := &pipeline.ResignOptions{
-		InputPath:    ipaPath,
-		OutputPath:   outputPath,
-		Identity:     identity,
-		BundleID:     app.BundleID,
-		BundleName:   app.Name,
-		ZipLevel:     1,
-		StripProfile: app.RemoveProfile,
+		InputPath:       ipaPath,
+		OutputPath:      outputPath,
+		WorkDir:         app.WorkDir,
+		Identity:        identity,
+		BundleID:        app.BundleID,
+		BundleName:      app.Name,
+		BundleVersion:   app.BundleVersion,
+		MinOSVersion:    app.MinOS,
+		StripExtensions: app.StripExtensions,
+		StripWatch:      app.StripWatch,
+		WeakInject:      app.WeakInject,
+		RemoveDylibs:    app.RemoveDylibs,
+		DeleteAssetsCar: app.DeleteAssetsCar,
+		ZipLevel:        0,
+		StripProfile:    app.RemoveProfile,
+	}
+	if len(app.IconFiles) > 0 {
+		opts.IconFiles = map[string][]byte{}
+		for _, ic := range app.IconFiles {
+			if b, e := base64.StdEncoding.DecodeString(ic.Data); e == nil {
+				opts.IconFiles[ic.Name] = b
+			}
+		}
+		opts.IconName = app.IconName
 	}
 
 	// --- Step 6: Load provisioning profile ---
-	if app.Profile != "" {
-		profile, err := parser.ParseFile(app.Profile)
-		if err != nil {
-			result.Error = fmt.Sprintf("load profile: %v", err)
+	if app.Profile != "" || app.ProfileData != "" {
+		var profile *provision.ProvisioningProfile
+		var perr error
+		if app.ProfileData != "" {
+			raw, derr := base64.StdEncoding.DecodeString(app.ProfileData)
+			if derr != nil {
+				result.Error = fmt.Sprintf("decode profile_data: %v", derr)
+				return done()
+			}
+			profile, perr = parser.ParseBytes(raw)
+		} else {
+			profile, perr = parser.ParseFile(app.Profile)
+		}
+		if perr != nil {
+			result.Error = fmt.Sprintf("load profile: %v", perr)
 			return done()
 		}
 		opts.Profile = profile
 		log.Printf("[worker] Profile: %s (Team: %s)", profile.Name, profile.GetTeamID())
 
-		xmlEnts, err := entitlements.Extract(profile)
-		if err == nil {
+		xmlEnts, eerr := entitlements.Extract(profile)
+		if eerr == nil {
 			opts.EntitlementsXML = xmlEnts
 		}
 	}
