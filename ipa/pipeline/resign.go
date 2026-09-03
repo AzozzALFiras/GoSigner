@@ -1,8 +1,10 @@
 package pipeline
 
 import (
+	"archive/zip"
 	"bytes"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -49,6 +51,27 @@ type ResignOptions struct {
 	IsAdhoc         bool     // Ad-hoc signing
 }
 
+// streamEntryToFile copies one zip entry to disk without ever holding it whole
+// in memory: the decompressed stream is piped through a fixed 64 KiB buffer.
+func streamEntryToFile(f *zip.File, destPath string, perm os.FileMode) error {
+	rc, err := f.Open()
+	if err != nil {
+		return err
+	}
+	defer rc.Close()
+
+	out, err := os.OpenFile(destPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, perm)
+	if err != nil {
+		return err
+	}
+	buf := make([]byte, 64*1024)
+	if _, err := io.CopyBuffer(out, rc, buf); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
+}
+
 // Resign performs the complete IPA re-signing pipeline.
 func Resign(opts *ResignOptions) error {
 	log.Printf("[GoSigner] Opening IPA: %s", opts.InputPath)
@@ -79,7 +102,10 @@ func Resign(opts *ResignOptions) error {
 
 	log.Printf("[GoSigner] Extracting to: %s", tempDir)
 
-	// Extract all files
+	// Extract all files. Each entry is streamed from the zip straight to disk
+	// with a fixed buffer — never read whole into memory — so peak RAM stays
+	// bounded regardless of file size. This is what lets multi-GB IPAs sign
+	// without tripping iOS jetsam. See docs/streaming-resign.md.
 	for _, f := range ipaReader.Files() {
 		if f.FileInfo().IsDir() {
 			dirPath := filepath.Join(tempDir, f.Name)
@@ -87,21 +113,18 @@ func Resign(opts *ResignOptions) error {
 			continue
 		}
 
-		data, err := ipaReader.ReadFile(f.Name)
-		if err != nil {
-			return fmt.Errorf("read %s: %w", f.Name, err)
-		}
-
 		destPath := filepath.Join(tempDir, f.Name)
-		os.MkdirAll(filepath.Dir(destPath), 0755)
+		if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+			return fmt.Errorf("mkdir %s: %w", filepath.Dir(destPath), err)
+		}
 
 		perm := os.FileMode(0644)
 		if f.Mode()&0111 != 0 {
 			perm = 0755
 		}
 
-		if err := os.WriteFile(destPath, data, perm); err != nil {
-			return fmt.Errorf("write %s: %w", f.Name, err)
+		if err := streamEntryToFile(f, destPath, perm); err != nil {
+			return fmt.Errorf("extract %s: %w", f.Name, err)
 		}
 	}
 
