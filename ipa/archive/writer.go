@@ -82,6 +82,38 @@ func (w *IPAWriter) AddFileFromReader(name string, r io.Reader, size int64) erro
 	return nil
 }
 
+// AddRaw copies an entry from a source zip verbatim — its already-compressed
+// bytes are streamed straight through, with no decompress/recompress. Used for
+// entries the signing pipeline did not modify, which keeps their original
+// compression (a Store-only rewrite can inflate a compressed IPA substantially)
+// and skips the CPU entirely. The mode is still forced to 0755 for the same
+// reason AddFile does it: iOS honors external_attr literally.
+func (w *IPAWriter) AddRaw(f *zip.File) error {
+	header := &zip.FileHeader{
+		Name:               f.Name,
+		Method:             f.Method,
+		Modified:           f.Modified,
+		CRC32:              f.CRC32,
+		CompressedSize64:   f.CompressedSize64,
+		UncompressedSize64: f.UncompressedSize64,
+	}
+	header.SetMode(0755)
+
+	dst, err := w.writer.CreateRaw(header)
+	if err != nil {
+		return fmt.Errorf("create raw zip entry %s: %w", f.Name, err)
+	}
+	src, err := f.OpenRaw()
+	if err != nil {
+		return fmt.Errorf("open raw zip entry %s: %w", f.Name, err)
+	}
+	buf := make([]byte, 64*1024)
+	if _, err := io.CopyBuffer(dst, src, buf); err != nil {
+		return fmt.Errorf("copy raw zip entry %s: %w", f.Name, err)
+	}
+	return nil
+}
+
 // AddExecutable adds an executable file with proper permissions.
 func (w *IPAWriter) AddExecutable(name string, data []byte) error {
 	header := &zip.FileHeader{

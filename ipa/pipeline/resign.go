@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"log"
 	"os"
@@ -70,6 +71,23 @@ func streamEntryToFile(f *zip.File, destPath string, perm os.FileMode) error {
 		return err
 	}
 	return out.Close()
+}
+
+// crc32OfFile streams a file through the IEEE CRC32 that zip stores, so an
+// unchanged entry can be recognised without loading it into memory.
+func crc32OfFile(path string) (uint32, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+
+	h := crc32.NewIEEE()
+	buf := make([]byte, 64*1024)
+	if _, err := io.CopyBuffer(h, f, buf); err != nil {
+		return 0, err
+	}
+	return h.Sum32(), nil
 }
 
 // Resign performs the complete IPA re-signing pipeline.
@@ -291,7 +309,7 @@ func Resign(opts *ResignOptions) error {
 
 	// Step 12: Repackage IPA
 	log.Printf("[GoSigner] Repackaging IPA: %s", opts.OutputPath)
-	if err := repackageIPA(tempDir, opts.OutputPath, opts.ZipLevel); err != nil {
+	if err := repackageIPA(tempDir, opts.OutputPath, opts.ZipLevel, ipaReader); err != nil {
 		return fmt.Errorf("repackage ipa: %w", err)
 	}
 
@@ -321,12 +339,20 @@ func modifyInfoPlist(appDir string, opts *ResignOptions) error {
 	return os.WriteFile(plistPath, modified, 0644)
 }
 
-func repackageIPA(sourceDir string, outputPath string, zipLevel int) error {
+func repackageIPA(sourceDir string, outputPath string, zipLevel int, src *archive.IPAReader) error {
 	writer, err := archive.CreateIPA(outputPath, zipLevel)
 	if err != nil {
 		return err
 	}
 	defer writer.Close()
+
+	// Index the source entries so untouched files can be copied verbatim.
+	srcEntries := map[string]*zip.File{}
+	if src != nil {
+		for _, f := range src.Files() {
+			srcEntries[f.Name] = f
+		}
+	}
 
 	return filepath.Walk(sourceDir, func(absPath string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -349,7 +375,19 @@ func repackageIPA(sourceDir string, outputPath string, zipLevel int) error {
 			return writer.AddDirectory(relPath)
 		}
 
-		// Stream the file into the zip — never load it whole into memory, so a
+		// Untouched by signing? Copy the original compressed bytes verbatim —
+		// no decompress, no recompress, and the entry keeps its compression
+		// (a Store-only rewrite inflates an already-compressed IPA a lot).
+		// Matching CRC32 *and* size proves the content is byte-identical, so
+		// this fast path is self-verifying: anything the pipeline changed
+		// falls through to the normal add below.
+		if orig, ok := srcEntries[relPath]; ok && orig.UncompressedSize64 == uint64(info.Size()) {
+			if sum, cerr := crc32OfFile(absPath); cerr == nil && sum == orig.CRC32 {
+				return writer.AddRaw(orig)
+			}
+		}
+
+		// Modified or new — stream it in, never whole-file into memory, so a
 		// multi-GB asset can't trip iOS jetsam. AddFileFromReader sets the same
 		// 0755 mode as AddFile/AddExecutable, so permissions are unchanged.
 		f, err := os.Open(absPath)
