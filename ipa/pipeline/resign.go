@@ -111,6 +111,26 @@ func Resign(opts *ResignOptions) error {
 	log.Printf("[GoSigner] Frameworks: %d, Plugins: %d, Dylibs: %d",
 		len(appBundle.Frameworks), len(appBundle.Plugins), len(appBundle.Dylibs))
 
+	// Pre-flight: signing needs room for the extracted bundle *and* the output
+	// IPA, and on iOS both land on the same (app container) filesystem. Check
+	// up front from the zip index — exact, and costs nothing — so a device
+	// that is too full fails with a clear message instead of dying half-way
+	// through with a confusing write error. See docs/streaming-resign.md.
+	workBase := opts.WorkDir
+	if workBase == "" {
+		workBase = os.TempDir()
+	}
+	var uncompressed uint64
+	for _, f := range ipaReader.Files() {
+		uncompressed += f.UncompressedSize64
+	}
+	required := uncompressed*2 + (64 << 20) // slack for signatures + metadata
+	if avail, ok := availableBytes(workBase); ok && avail < required {
+		return fmt.Errorf("insufficient_disk: need %d MB free, have %d MB",
+			required>>20, avail>>20)
+	}
+	log.Printf("[GoSigner] Space check: need ~%d MB, payload %d MB", required>>20, uncompressed>>20)
+
 	// Step 2: Extract to temp directory for signing
 	tempDir, err := os.MkdirTemp(opts.WorkDir, "gosigner-*")
 	if err != nil {
