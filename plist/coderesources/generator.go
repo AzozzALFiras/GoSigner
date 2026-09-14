@@ -17,6 +17,16 @@ import (
 // and is excluded from the resource envelope — it's covered by its own
 // embedded Mach-O code signature, not by CodeResources.
 func Generate(appPath, mainExecutable string) ([]byte, error) {
+	return GenerateWith(appPath, mainExecutable, nil)
+}
+
+// HashLookup returns hashes already known for a file, or nil to have the file
+// read and hashed. It lets the pipeline seal resources it hashed while
+// streaming them out of the archive, without ever writing their bytes to disk.
+type HashLookup func(absPath string, info os.FileInfo) *FileHashes
+
+// GenerateWith is Generate with a source of precomputed hashes.
+func GenerateWith(appPath, mainExecutable string, lookup HashLookup) ([]byte, error) {
 	files1 := make(map[string]interface{})
 	files2 := make(map[string]interface{})
 	rules := DefaultRulesV1()
@@ -50,9 +60,15 @@ func Generate(appPath, mainExecutable string) ([]byte, error) {
 			return nil
 		}
 
-		hashes, err := HashFile(absPath)
-		if err != nil {
-			return fmt.Errorf("hash %s: %w", relPath, err)
+		var hashes *FileHashes
+		if lookup != nil {
+			hashes = lookup(absPath, info)
+		}
+		if hashes == nil {
+			hashes, err = HashFile(absPath)
+			if err != nil {
+				return fmt.Errorf("hash %s: %w", relPath, err)
+			}
 		}
 
 		// Match rules1 and rules2 INDEPENDENTLY. This is the same

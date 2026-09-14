@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/AzozzALFiras/GoSigner/certificate"
 	"github.com/AzozzALFiras/GoSigner/ipa/archive"
@@ -50,27 +51,6 @@ type ResignOptions struct {
 	WorkDir         string   // base dir for the temp extraction (empty = os default)
 	DeleteAssetsCar bool     // remove Assets.car (forces loose-PNG icon)
 	IsAdhoc         bool     // Ad-hoc signing
-}
-
-// streamEntryToFile copies one zip entry to disk without ever holding it whole
-// in memory: the decompressed stream is piped through a fixed 64 KiB buffer.
-func streamEntryToFile(f *zip.File, destPath string, perm os.FileMode) error {
-	rc, err := f.Open()
-	if err != nil {
-		return err
-	}
-	defer rc.Close()
-
-	out, err := os.OpenFile(destPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, perm)
-	if err != nil {
-		return err
-	}
-	buf := make([]byte, 64*1024)
-	if _, err := io.CopyBuffer(out, rc, buf); err != nil {
-		out.Close()
-		return err
-	}
-	return out.Close()
 }
 
 // crc32OfFile streams a file through the IEEE CRC32 that zip stores, so an
@@ -120,18 +100,15 @@ func Resign(opts *ResignOptions) error {
 	if workBase == "" {
 		workBase = os.TempDir()
 	}
-	var uncompressed uint64
-	for _, f := range ipaReader.Files() {
-		uncompressed += f.UncompressedSize64
-	}
-	required := uncompressed*2 + (64 << 20) // slack for signatures + metadata
+	code := codePaths(appBundle)
+	required := estimateSpace(ipaReader.Files(), code)
 	if avail, ok := availableBytes(workBase); ok && avail < required {
 		return fmt.Errorf("insufficient_disk: need %d MB free, have %d MB",
 			required>>20, avail>>20)
 	}
-	log.Printf("[GoSigner] Space check: need ~%d MB, payload %d MB", required>>20, uncompressed>>20)
+	log.Printf("[GoSigner] Space check: need ~%d MB", required>>20)
 
-	// Step 2: Extract to temp directory for signing
+	// Step 2: Lay the bundle out for signing
 	tempDir, err := os.MkdirTemp(opts.WorkDir, "gosigner-*")
 	if err != nil {
 		return fmt.Errorf("create temp dir: %w", err)
@@ -139,32 +116,13 @@ func Resign(opts *ResignOptions) error {
 	defer os.RemoveAll(tempDir)
 
 	log.Printf("[GoSigner] Extracting to: %s", tempDir)
-
-	// Extract all files. Each entry is streamed from the zip straight to disk
-	// with a fixed buffer — never read whole into memory — so peak RAM stays
-	// bounded regardless of file size. This is what lets multi-GB IPAs sign
-	// without tripping iOS jetsam. See docs/streaming-resign.md.
-	for _, f := range ipaReader.Files() {
-		if f.FileInfo().IsDir() {
-			dirPath := filepath.Join(tempDir, f.Name)
-			os.MkdirAll(dirPath, 0755)
-			continue
-		}
-
-		destPath := filepath.Join(tempDir, f.Name)
-		if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
-			return fmt.Errorf("mkdir %s: %w", filepath.Dir(destPath), err)
-		}
-
-		perm := os.FileMode(0644)
-		if f.Mode()&0111 != 0 {
-			perm = 0755
-		}
-
-		if err := streamEntryToFile(f, destPath, perm); err != nil {
-			return fmt.Errorf("extract %s: %w", f.Name, err)
-		}
+	phase := time.Now()
+	lay, err := materialise(ipaReader.Files(), tempDir, code)
+	if err != nil {
+		return err
 	}
+	log.Printf("[GoSigner] Extracted in %s (%d MB written, %d resources sealed from the archive)",
+		time.Since(phase).Round(time.Millisecond), lay.written>>20, len(lay.placeholders))
 
 	appDir := filepath.Join(tempDir, appBundle.AppPath)
 
@@ -262,23 +220,37 @@ func Resign(opts *ResignOptions) error {
 	// "org.cocoapods.FirebaseCore"), not the host app's. iOS 26 rejects
 	// any component whose CD identifier is empty or doesn't match its
 	// bundle plist — this was the silent-install trigger.
+	//
+	// Steps 6–8 are independent — each component seals only its own directory
+	// — so they run concurrently. Only the main executable (step 11), which
+	// seals all of them, has to wait.
+	phase = time.Now()
+	var jobs []func() error
 	for _, fw := range appBundle.Frameworks {
-		log.Printf("[GoSigner] Signing framework: %s", fw.Path)
-		fwDir := filepath.Join(tempDir, fw.Path)
-		if err := signComponent(fwDir, fw.ExecutableName, opts, false); err != nil {
-			return fmt.Errorf("sign framework %s: %w", fw.Path, err)
-		}
+		fw := fw
+		jobs = append(jobs, func() error {
+			log.Printf("[GoSigner] Signing framework: %s", fw.Path)
+			fwDir := filepath.Join(tempDir, fw.Path)
+			if err := signComponent(fwDir, fw.ExecutableName, opts, false, lay.lookup); err != nil {
+				return fmt.Errorf("sign framework %s: %w", fw.Path, err)
+			}
+			return nil
+		})
 	}
 
 	// Step 7: Sign loose dylibs. Dylibs have no Info.plist — esign/zsign
 	// use the dylib's own filename (e.g. "Enjoy.dylib") as the CD
 	// identifier. Not a main binary; execSegFlags stays 0.
 	for _, dylibPath := range appBundle.Dylibs {
-		log.Printf("[GoSigner] Signing dylib: %s", dylibPath)
-		fullPath := filepath.Join(tempDir, dylibPath)
-		if err := signDylib(fullPath, opts); err != nil {
-			return fmt.Errorf("sign dylib %s: %w", dylibPath, err)
-		}
+		dylibPath := dylibPath
+		jobs = append(jobs, func() error {
+			log.Printf("[GoSigner] Signing dylib: %s", dylibPath)
+			fullPath := filepath.Join(tempDir, dylibPath)
+			if err := signDylib(fullPath, opts); err != nil {
+				return fmt.Errorf("sign dylib %s: %w", dylibPath, err)
+			}
+			return nil
+		})
 	}
 
 	// Step 8: Sign plugins (.appex). Each plugin has its own Info.plist
@@ -287,12 +259,20 @@ func Resign(opts *ResignOptions) error {
 	// set — otherwise iOS treats the appex like a helper library and
 	// rejects the enclosing app on 26.
 	for _, plugin := range appBundle.Plugins {
-		log.Printf("[GoSigner] Signing plugin: %s", plugin.Path)
-		plugDir := filepath.Join(tempDir, plugin.Path)
-		if err := signComponent(plugDir, plugin.ExecutableName, opts, true); err != nil {
-			return fmt.Errorf("sign plugin %s: %w", plugin.Path, err)
-		}
+		plugin := plugin
+		jobs = append(jobs, func() error {
+			log.Printf("[GoSigner] Signing plugin: %s", plugin.Path)
+			plugDir := filepath.Join(tempDir, plugin.Path)
+			if err := signComponent(plugDir, plugin.ExecutableName, opts, true, lay.lookup); err != nil {
+				return fmt.Errorf("sign plugin %s: %w", plugin.Path, err)
+			}
+			return nil
+		})
 	}
+	if err := signConcurrently(jobs); err != nil {
+		return err
+	}
+	log.Printf("[GoSigner] Signed %d components in %s", len(jobs), time.Since(phase).Round(time.Millisecond))
 
 	// Step 9: Handle dylib injection/removal on main executable
 	mainExecPath := filepath.Join(appDir, appBundle.ExecutableName)
@@ -309,7 +289,7 @@ func Resign(opts *ResignOptions) error {
 
 	// Step 10: Generate CodeResources
 	log.Printf("[GoSigner] Generating CodeResources")
-	codeResourcesData, err := coderesources.Generate(appDir, appBundle.ExecutableName)
+	codeResourcesData, err := coderesources.GenerateWith(appDir, appBundle.ExecutableName, lay.lookup)
 	if err != nil {
 		return fmt.Errorf("generate code resources: %w", err)
 	}
@@ -329,9 +309,11 @@ func Resign(opts *ResignOptions) error {
 
 	// Step 12: Repackage IPA
 	log.Printf("[GoSigner] Repackaging IPA: %s", opts.OutputPath)
-	if err := repackageIPA(tempDir, opts.OutputPath, opts.ZipLevel, ipaReader); err != nil {
+	phase = time.Now()
+	if err := repackageIPA(tempDir, opts.OutputPath, opts.ZipLevel, ipaReader, lay); err != nil {
 		return fmt.Errorf("repackage ipa: %w", err)
 	}
+	log.Printf("[GoSigner] Repackaged in %s", time.Since(phase).Round(time.Millisecond))
 
 	log.Printf("[GoSigner] Done! Signed IPA: %s", opts.OutputPath)
 	return nil
@@ -359,7 +341,7 @@ func modifyInfoPlist(appDir string, opts *ResignOptions) error {
 	return os.WriteFile(plistPath, modified, 0644)
 }
 
-func repackageIPA(sourceDir string, outputPath string, zipLevel int, src *archive.IPAReader) error {
+func repackageIPA(sourceDir string, outputPath string, zipLevel int, src *archive.IPAReader, lay *layout) error {
 	writer, err := archive.CreateIPA(outputPath, zipLevel)
 	if err != nil {
 		return err
@@ -393,6 +375,14 @@ func repackageIPA(sourceDir string, outputPath string, zipLevel int, src *archiv
 
 		if info.IsDir() {
 			return writer.AddDirectory(relPath)
+		}
+
+		// A placeholder nothing replaced: its bytes only exist in the source
+		// archive, and they are copied from there without reading the file.
+		if lay != nil {
+			if p, ok := lay.untouched(absPath, info); ok {
+				return writer.AddRaw(p.entry)
+			}
 		}
 
 		// Untouched by signing? Copy the original compressed bytes verbatim —
@@ -447,7 +437,7 @@ var emptyEntitlementsXML = []byte(`<?xml version="1.0" encoding="UTF-8"?>
 //
 // Frameworks (isMainBinary=false) get an empty <dict/> entitlements
 // blob and NO DER entitlements.
-func signComponent(componentDir, executableName string, opts *ResignOptions, isMainBinary bool) error {
+func signComponent(componentDir, executableName string, opts *ResignOptions, isMainBinary bool, lookup coderesources.HashLookup) error {
 	if executableName == "" {
 		return nil
 	}
@@ -463,7 +453,7 @@ func signComponent(componentDir, executableName string, opts *ResignOptions, isM
 	// Generate CodeResources FIRST — the component's Mach-O code signature
 	// must hash _CodeSignature/CodeResources into special slot -3. Signing
 	// before generating it leaves that slot zero and iOS 26 rejects.
-	crData, err := coderesources.Generate(componentDir, executableName)
+	crData, err := coderesources.GenerateWith(componentDir, executableName, lookup)
 	if err != nil {
 		return fmt.Errorf("generate code resources: %w", err)
 	}

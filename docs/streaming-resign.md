@@ -1,5 +1,35 @@
 # Streaming re-sign — signing very large IPAs on-device
 
+## Status (2026-09-14) — what shipped
+
+A lighter form of the design below, in `ipa/pipeline/materialise.go`:
+
+- **One parallel pass** (up to 6 workers) decompresses every entry exactly once.
+  Small entries (≤ 1 MiB), every discovered code path, and anything whose first
+  four bytes are a Mach-O magic are written out for real. Every other large
+  resource is streamed through SHA-1 + SHA-256 and left as a **sparse
+  placeholder** of the right size, stamped with the zip-epoch mtime.
+- `coderesources.GenerateWith` takes those hashes instead of re-reading the file
+  (`HashLookup`), and repackaging **raw-copies** a placeholder straight from the
+  source archive when its size and sentinel mtime prove nothing replaced it.
+- Frameworks, loose dylibs and plugins are **signed concurrently** — each seals
+  only its own directory; the main executable still comes last.
+- The space pre-flight counts what is really written plus the output, not twice
+  the uncompressed payload.
+
+Measured on an M-series Mac against the old engine, same inputs, outputs
+identical apart from CMS signing timestamps and plist key order (the same
+entries differ between two runs of the *old* engine):
+
+| IPA | old | new | written to disk |
+|---|---|---|---|
+| NSAUD 17.9 MB / 42 MB unpacked | 520 ms | 297 ms | 42 MB → 38 MB |
+| synthetic 933 MB / 1.85 GB unpacked | 5.6 s | 2.4 s | 1.85 GB → 45 MB |
+
+On a phone the disk writes are the expensive part, so the gain there is larger
+than on the Mac, and the free space a big app needs drops by the size of its
+resources.
+
 ## Problem
 
 The current pipeline extracts **every** zip entry to disk by reading the whole
