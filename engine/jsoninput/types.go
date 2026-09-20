@@ -13,8 +13,8 @@ type AppRequest struct {
 
 	// Signing
 	CertPassword  string `json:"cert_password"`  // Certificate password (empty if none)
-	Profile       string `json:"profile"`         // Full path to .mobileprovision
-	RemoveProfile bool   `json:"remove_profile"`  // Strip profile after signing
+	Profile       string `json:"profile"`        // Full path to .mobileprovision
+	RemoveProfile bool   `json:"remove_profile"` // Strip profile after signing
 
 	// App modification
 	Name     string `json:"name"`      // Override display name (empty = keep original)
@@ -32,16 +32,16 @@ type AppRequest struct {
 	PlistBaseURL string `json:"plist_base_url"` // e.g. "https://cdn.neon1.io/signature/plist/"
 
 	// Install plist generation
-	URLIcon     string `json:"url_icon"`    // Public URL to the app icon
+	URLIcon     string `json:"url_icon"`     // Public URL to the app icon
 	CreatePlist bool   `json:"create_plist"` // Generate OTA install .plist
 
 	// In-memory signing material (base64) + encrypted bundle. Populated by the FFI
 	// layer; the plaintext cert/profile never touch disk.
 	CertData    string `json:"cert_data"`
 	ProfileData string `json:"profile_data"`
-	Enc    string `json:"enc"`
-	Udid   string `json:"udid"`
-	CertID string `json:"cert_id"`
+	Enc         string `json:"enc"`
+	Udid        string `json:"udid"`
+	CertID      string `json:"cert_id"`
 
 	// Edit-page options.
 	BundleVersion   string     `json:"bundle_version"`
@@ -54,6 +54,11 @@ type AppRequest struct {
 	IconName        string     `json:"icon_name"`
 	IconFiles       []IconFile `json:"icon_files"`
 	WorkDir         string     `json:"work_dir"`
+
+	// Plan asks for the signed archive to be described rather than written —
+	// no second copy of the app on disk. The result then carries PlanPath and
+	// PlanLength, and the caller serves the bytes with GoSignerServe.
+	Plan bool `json:"plan"`
 }
 
 // DylibEntry describes a dylib to inject, optionally with its .bundle resources.
@@ -78,11 +83,14 @@ type Response struct {
 type AppResult struct {
 	Success     bool   `json:"success"`
 	IPA         string `json:"ipa"`                    // Original IPA path/URL
-	OutputIPA   string `json:"output_ipa"`              // Final signed IPA full path
-	OutputPlist string `json:"output_plist,omitempty"`   // Install plist full path
-	PlistURL    string `json:"plist_url,omitempty"`      // Public plist URL for itms-services://
-	Name        string `json:"name"`                    // Final app name
-	BundleID    string `json:"bundle_id"`               // Final bundle ID
-	Duration    string `json:"duration"`                // Time taken (e.g. "4.2s")
-	Error       string `json:"error,omitempty"`          // Error message if failed
+	OutputIPA   string `json:"output_ipa"`             // Final signed IPA full path
+	OutputPlist string `json:"output_plist,omitempty"` // Install plist full path
+	PlistURL    string `json:"plist_url,omitempty"`    // Public plist URL for itms-services://
+	Name        string `json:"name"`                   // Final app name
+	BundleID    string `json:"bundle_id"`              // Final bundle ID
+	Duration    string `json:"duration"`               // Time taken (e.g. "4.2s")
+	PlanPath    string `json:"plan_path,omitempty"`    // Plan mode: the archive's description
+	PlanLength  int64  `json:"plan_length,omitempty"`  // Plan mode: the archive's exact size
+	WorkDir     string `json:"work_dir,omitempty"`     // Plan mode: delete once installed
+	Error       string `json:"error,omitempty"`        // Error message if failed
 }

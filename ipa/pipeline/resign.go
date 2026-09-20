@@ -51,6 +51,13 @@ type ResignOptions struct {
 	WorkDir         string   // base dir for the temp extraction (empty = os default)
 	DeleteAssetsCar bool     // remove Assets.car (forces loose-PNG icon)
 	IsAdhoc         bool     // Ad-hoc signing
+
+	// Plan asks for the signed archive to be *described* rather than written:
+	// no output file, and the work directory is kept for the caller to serve
+	// from and to delete. See archive.Plan — it is what lets a phone sign an
+	// app far larger than its free space.
+	Plan       bool
+	PlanResult *PlanResult
 }
 
 // crc32OfFile streams a file through the IEEE CRC32 that zip stores, so an
@@ -101,7 +108,7 @@ func Resign(opts *ResignOptions) error {
 		workBase = os.TempDir()
 	}
 	code := codePaths(appBundle)
-	required := estimateSpace(ipaReader.Files(), code)
+	required := estimateSpace(ipaReader.Files(), code, opts.Plan)
 	if avail, ok := availableBytes(workBase); ok && avail < required {
 		return fmt.Errorf("insufficient_disk: need %d MB free, have %d MB",
 			required>>20, avail>>20)
@@ -113,7 +120,14 @@ func Resign(opts *ResignOptions) error {
 	if err != nil {
 		return fmt.Errorf("create temp dir: %w", err)
 	}
-	defer os.RemoveAll(tempDir)
+	// Plan mode serves the archive out of this directory long after Resign
+	// returns, so the caller deletes it once the install is done.
+	keepWork := false
+	defer func() {
+		if !keepWork {
+			os.RemoveAll(tempDir)
+		}
+	}()
 
 	log.Printf("[GoSigner] Extracting to: %s", tempDir)
 	phase := time.Now()
@@ -308,8 +322,24 @@ func Resign(opts *ResignOptions) error {
 	}
 
 	// Step 12: Repackage IPA
-	log.Printf("[GoSigner] Repackaging IPA: %s", opts.OutputPath)
 	phase = time.Now()
+	if opts.Plan {
+		plan, err := buildPlan(tempDir, opts.InputPath, ipaReader, lay)
+		if err != nil {
+			return fmt.Errorf("plan ipa: %w", err)
+		}
+		planPath := filepath.Join(tempDir, "plan.json")
+		if err := plan.Save(planPath); err != nil {
+			return fmt.Errorf("save plan: %w", err)
+		}
+		opts.PlanResult = &PlanResult{Path: planPath, WorkDir: tempDir, Length: plan.Length()}
+		keepWork = true
+		log.Printf("[GoSigner] Planned %d MB archive in %s (nothing written)",
+			plan.Length()>>20, time.Since(phase).Round(time.Millisecond))
+		return nil
+	}
+
+	log.Printf("[GoSigner] Repackaging IPA: %s", opts.OutputPath)
 	if err := repackageIPA(tempDir, opts.OutputPath, opts.ZipLevel, ipaReader, lay); err != nil {
 		return fmt.Errorf("repackage ipa: %w", err)
 	}

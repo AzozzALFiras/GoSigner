@@ -171,6 +171,7 @@ func processApp(app jsoninput.AppRequest) jsoninput.AppResult {
 		DeleteAssetsCar: app.DeleteAssetsCar,
 		ZipLevel:        0,
 		StripProfile:    app.RemoveProfile,
+		Plan:            app.Plan,
 	}
 	if len(app.IconFiles) > 0 {
 		opts.IconFiles = map[string][]byte{}
@@ -230,8 +231,32 @@ func processApp(app jsoninput.AppRequest) jsoninput.AppResult {
 		return done()
 	}
 
-	result.OutputIPA = outputPath
 	result.Success = true
+
+	// Plan mode wrote no archive. The caller serves it out of the work
+	// directory and deletes that once the install is done.
+	if app.Plan {
+		if plan := opts.PlanResult; plan != nil {
+			result.PlanPath = plan.Path
+			result.WorkDir = plan.WorkDir
+			result.PlanLength = plan.Length
+			if info := readWorkAppInfo(plan.WorkDir); info != nil {
+				if result.BundleID == "" {
+					result.BundleID = info.BundleID
+				}
+				if result.Name == "" {
+					result.Name = info.BundleName
+					if result.Name == "" {
+						result.Name = info.BundleDisplayName
+					}
+				}
+			}
+		}
+		log.Printf("[worker] Planned %d MB (took %s)", result.PlanLength>>20, time.Since(start).Round(time.Millisecond))
+		return done()
+	}
+
+	result.OutputIPA = outputPath
 
 	// --- Step 9: Read final bundle ID and name from signed IPA ---
 	if finalInfo := readSignedAppInfo(outputPath); finalInfo != nil {
@@ -290,6 +315,24 @@ func processApp(app jsoninput.AppRequest) jsoninput.AppResult {
 
 	log.Printf("[worker] Done: %s (took %s)", outputPath, time.Since(start).Round(time.Millisecond))
 	return done()
+}
+
+// readWorkAppInfo reads the bundle's Info.plist as signing left it in the work
+// directory — plan mode has no archive to read it back from.
+func readWorkAppInfo(workDir string) *plTypes.InfoPlistData {
+	matches, err := filepath.Glob(filepath.Join(workDir, "Payload", "*.app", "Info.plist"))
+	if err != nil || len(matches) == 0 {
+		return nil
+	}
+	data, err := os.ReadFile(matches[0])
+	if err != nil {
+		return nil
+	}
+	info, err := infoplist.ReadFromBytes(data)
+	if err != nil {
+		return nil
+	}
+	return info
 }
 
 // readSignedAppInfo reads Info.plist from a signed IPA to get the final bundle ID and name.

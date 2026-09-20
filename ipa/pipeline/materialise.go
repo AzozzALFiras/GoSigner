@@ -105,15 +105,20 @@ func codePaths(b *ipaTypes.AppBundle) map[string]bool {
 }
 
 // estimateSpace is the pre-flight figure: bytes that will be written out, plus
-// the output archive. Large entries that are not code are assumed to become
-// placeholders (a few MB of misjudged Mach-O is covered by the slack).
-func estimateSpace(files []*zip.File, code map[string]bool) uint64 {
+// the output archive — which plan mode does not write at all, and which is the
+// larger half for a big app. Large entries that are not code are assumed to
+// become placeholders (a few MB of misjudged Mach-O is covered by the slack).
+func estimateSpace(files []*zip.File, code map[string]bool, plan bool) uint64 {
 	var real, compressed uint64
 	for _, f := range files {
 		compressed += f.CompressedSize64
 		if f.UncompressedSize64 <= smallEntryBytes || code[f.Name] || path.Ext(f.Name) == "" {
 			real += f.UncompressedSize64
 		}
+	}
+	if plan {
+		// Only what is laid out on disk; the archive is served from here.
+		return real + (64 << 20)
 	}
 	return real + compressed + real + (64 << 20)
 }

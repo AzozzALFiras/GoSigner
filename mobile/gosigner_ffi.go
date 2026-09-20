@@ -33,6 +33,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"unsafe"
 
 	"github.com/AzozzALFiras/GoSigner/engine/jsoninput"
@@ -128,8 +129,8 @@ func applyEncrypted(req *jsoninput.Request) error {
 		if err != nil {
 			return fmt.Errorf("app %d: %w", i, err)
 		}
-		a.CertData = b.P12    // worker base64-decodes CertData
-		a.ProfileData = b.MP  // worker base64-decodes ProfileData
+		a.CertData = b.P12   // worker base64-decodes CertData
+		a.ProfileData = b.MP // worker base64-decodes ProfileData
 		a.CertPassword = b.Password
 		a.Enc, a.Udid, a.CertID = "", "", ""
 	}
@@ -184,6 +185,52 @@ func GoSignerExtractDylibs(ipaPath, outDir *C.char) *C.char {
 		return cjson(map[string]any{"dylibs": []any{}, "error": err.Error()})
 	}
 	return cjson(map[string]any{"dylibs": res})
+}
+
+// planCache keeps the last plan parsed, so serving a 3 GB archive in chunks
+// does not re-read its description thousands of times.
+var (
+	planMu   sync.Mutex
+	planPath string
+	planHeld *archive.Plan
+)
+
+func cachedPlan(path string) (*archive.Plan, error) {
+	planMu.Lock()
+	defer planMu.Unlock()
+	if planHeld != nil && planPath == path {
+		return planHeld, nil
+	}
+	p, err := archive.LoadPlan(path)
+	if err != nil {
+		return nil, err
+	}
+	planPath, planHeld = path, p
+	return p, nil
+}
+
+// Writes [offset, offset+length) of the planned archive into a freshly
+// allocated buffer — the bytes iOS is asking for, generated from the source
+// archive and the files signing produced, so the archive itself never exists.
+// The caller frees the buffer with GoSignerFree.
+//
+//export GoSignerServe
+func GoSignerServe(planPath *C.char, offset C.longlong, length C.longlong, outLen *C.int) *C.char {
+	*outLen = 0
+	plan, err := cachedPlan(C.GoString(planPath))
+	if err != nil {
+		log.Printf("[serve] load plan: %v", err)
+		return nil
+	}
+	var buf bytes.Buffer
+	buf.Grow(int(length))
+	if err := plan.WriteRange(&buf, int64(offset), int64(length)); err != nil {
+		log.Printf("[serve] range %d+%d: %v", int64(offset), int64(length), err)
+		return nil
+	}
+	b := buf.Bytes()
+	*outLen = C.int(len(b))
+	return (*C.char)(C.CBytes(b))
 }
 
 //export GoSignerFree
